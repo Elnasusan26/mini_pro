@@ -89,6 +89,10 @@ class TeachingAssignment(db.Model):
     teacher_id = db.Column(db.Integer, db.ForeignKey("teacher.id"))
     subject_id = db.Column(db.Integer, db.ForeignKey("subject.id"))
     class_id = db.Column(db.Integer, db.ForeignKey("class.id"))
+    hours_per_week = db.Column(db.Integer, default=3)
+    __table_args__ = (
+        db.UniqueConstraint('teacher_id', 'subject_id', 'class_id'),
+    )
 
 class TimetableEntry(db.Model):
     __tablename__ = "timetable_entry"
@@ -109,7 +113,10 @@ class TimetableEntry(db.Model):
 
     is_lab_hour = db.Column(db.Boolean, default=False)
     is_floating = db.Column(db.Boolean, default=False)
-
+    __table_args__ = (
+        db.Index('idx_class_day_slot', 'class_id', 'day', 'slot'),
+        db.Index('idx_teacher_day_slot', 'teacher_id', 'day', 'slot'),
+    )
   
     class_obj = db.relationship("Class", backref="timetable_entries")
     subject = db.relationship("Subject")

@@ -1,6 +1,8 @@
 import pandas as pd
 from models import db, Class, Room, Teacher, Subject, TimetableEntry, User,TeachingAssignment
 from utils.normalize import normalize_slot, normalize_subject
+SUBJECT_REQUIREMENTS = {}
+PARALLEL_DATA = {}
 
 def normalize(df):
     df.columns = (
@@ -42,7 +44,8 @@ def delete_base_entry(class_id, day, slot):
 def process_inputs():
 
     print("\n========== INPUT PROCESSOR START ==========\n")
-
+    SUBJECT_REQUIREMENTS.clear()
+    PARALLEL_DATA.clear()
     TimetableEntry.query.delete()
     TeachingAssignment.query.delete() 
     Subject.query.delete()
@@ -203,153 +206,26 @@ def process_inputs():
 
     db.session.commit()
 
-    print("Teachers, subjects, and teaching assignments processed successfully!")
+    # SUBJECT REQUIREMENTS
+    df = normalize(pd.read_excel("uploads/subject_requirements.xlsx"))
 
-    xls = pd.ExcelFile("uploads/timetables.xlsx")
+    class_col = get_class_column(df)
 
-    for sheet in xls.sheet_names:
+    for _, r in df.iterrows():
 
-        sheet_name = sheet.strip()
+        class_name = str(r[class_col]).strip()
+        subject_name = normalize_subject(r["subject"])
+        hours = int(r["periods_per_week"])
 
-        if sheet_name not in class_map:
+        cls = class_map.get(class_name)
+        subject = subject_map.get(subject_name)
+
+        if not cls or not subject:
             continue
 
-        cls = class_map[sheet_name]
+        SUBJECT_REQUIREMENTS.setdefault(cls.id, {})
 
-        df = normalize(pd.read_excel(xls, sheet_name=sheet))
-
-        day_col = df.columns[0]
-        slots = df.columns[1:]
-
-        for _, row in df.iterrows():
-
-            day = str(row[day_col]).strip().upper()
-
-            for slot in slots:
-
-                raw_slot = normalize_slot(slot)
-                value = row[slot]
-
-                if pd.isna(value):
-                    continue
-
-                subject_name = normalize_subject(value)
-
-                if subject_name in ["activity", "activity_hour"]:
-
-                    db.session.add(TimetableEntry(
-                        class_id=cls.id,
-                        subject_id=None,
-                        teacher_id=None,
-                        room_id=None,
-                        day=day,
-                        slot=raw_slot
-                    ))
-
-                    continue
-
-                if subject_type.get(subject_name) == "lab":
-
-                    subject = subject_map.get(subject_name)
-
-                    if subject is None:
-                        subject = Subject.query.filter_by(name=subject_name).first()
-
-                    if subject is None:
-                        subject = Subject(
-                            name=subject_name,
-                            is_lab=(subject_type.get(subject_name) == "lab")
-                        )
-                        db.session.add(subject)
-                        db.session.flush()
-
-                    subject_map[subject_name] = subject
-
-                    assignments = TeachingAssignment.query.filter_by(
-                        subject_id=subject.id,
-                        class_id=cls.id
-                    ).all()
-
-                  
-                    if assignments:
-                        for assign in assignments:
-                            db.session.add(TimetableEntry(
-                                class_id=cls.id,
-                                subject_id=subject.id,
-                                teacher_id=assign.teacher_id,
-                                day=day,
-                                slot=raw_slot,
-                                lab_rooms=None,
-                                is_lab_hour=True,
-                                is_floating=(cls.class_category == "floating")
-                            ))
-                    else:
-                        db.session.add(TimetableEntry(
-                            class_id=cls.id,
-                            subject_id=subject.id,
-                            teacher_id=None,   # 🔥 THIS IS KEY
-                            day=day,
-                            slot=raw_slot,
-                            lab_rooms=None,
-                            is_lab_hour=True,
-                            is_floating=(cls.class_category == "floating")
-                        ))
-                    continue
-
-                subject = Subject.query.filter_by(name=subject_name).first()
-
-                if subject is None:
-                    subject = Subject(
-                        name=subject_name,
-                        is_lab=(subject_type.get(subject_name) == "lab")
-                    )
-                    db.session.add(subject)
-                    db.session.flush()
-
-                subject_map[subject_name] = subject
-
-                if subject is None:
-                    subject = Subject(
-                        name=subject_name,
-                        is_lab=(subject_type.get(subject_name) == "lab")
-                    )
-                    db.session.add(subject)
-                    db.session.flush()
-
-                if subject is None:
-                    subject = Subject(name=subject_name)
-                    db.session.add(subject)
-                    db.session.flush()
-
-                subject_map[subject_name] = subject
-
-                room_id = None
-
-                if cls.class_category == "permanent":
-
-                    room = Room.query.filter_by(
-                        owner_class_id=cls.id
-                    ).first()
-
-                    if room:
-                        room_id = room.id
-
-                assignment = TeachingAssignment.query.filter_by(
-                    subject_id=subject.id,
-                    class_id=cls.id
-                ).first()
-
-                teacher_id = assignment.teacher_id if assignment else None
-                db.session.add(TimetableEntry(
-                    class_id=cls.id,
-                    subject_id=subject.id,
-                    teacher_id=teacher_id,
-                    room_id=room_id,
-                    day=day,
-                    slot=raw_slot,
-                    is_floating=(cls.class_category == "floating")
-                ))
-
+        SUBJECT_REQUIREMENTS[cls.id][subject.id] = hours
 
     df = normalize(pd.read_excel("uploads/parallel_classes.xlsx"))
 
@@ -368,7 +244,7 @@ def process_inputs():
         slot = normalize_slot(r[slot_col])
         batch = str(r["batch"]).strip()
 
-        delete_base_entry(cls.id, day, slot)
+        PARALLEL_DATA.setdefault(cls.id, [])
 
         subject = subject_map.get(subject_name)
 
@@ -385,15 +261,12 @@ def process_inputs():
 
 
         teacher_id = assignment.teacher_id if assignment else None
-        db.session.add(TimetableEntry(
-            class_id=cls.id,
-            subject_id=subject.id,
-            teacher_id=teacher_id,
-            day=day,
-            slot=slot,
-            batch=batch,
-            is_floating=True
-        ))
+        PARALLEL_DATA[cls.id].append({
+        "subject_id": subject.id,
+        "day": day,
+        "slot": slot,
+        "batch": batch
+    })
 
     df = normalize(pd.read_excel("uploads/student_mapping.xlsx"))
 

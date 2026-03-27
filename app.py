@@ -192,7 +192,7 @@ def admin_upload():
             "teacher_subject": "teacher_subject_mapping.xlsx",
             "parallel_classes": "parallel_classes.xlsx",
             "student_mapping": "student_mapping.xlsx",
-            "timetables": "timetables.xlsx",
+            "subject_requirements": "subject_requirements.xlsx",
             "lab_rooms": "lab_rooms.xlsx"
         }
 
@@ -207,6 +207,10 @@ def admin_upload():
 
         process_inputs()
         process_lab_rooms()
+
+        from scheduler import generate_timetable
+        generate_timetable()
+
         allocate_rooms()
 
         return redirect(url_for("view_floating_timetable"))
