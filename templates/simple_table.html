@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{ title }}</title>
+</head>
+<body>
+<h2>{{ title }}</h2>
+
+<table border="1" cellpadding="6">
+    <tr>
+        {% for key in tables[0].keys() %}
+        <th>{{ key }}</th>
+        {% endfor %}
+    </tr>
+    {% for row in tables %}
+    <tr>
+        {% for val in row.values() %}
+        <td>{{ val }}</td>
+        {% endfor %}
+    </tr>
+    {% endfor %}
+</table>
+
+</body>
+</html>
