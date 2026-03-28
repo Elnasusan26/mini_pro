@@ -33,29 +33,36 @@ def generate_timetable():
         tasks = []
         lab_tasks = []
 
-        # 🔥 STEP 1: SPLIT LAB & THEORY
+        # 🔥 STEP 1: GROUP SUBJECTS
+        subject_map = {}
         for a in assignments:
-            hours = SUBJECT_REQUIREMENTS.get(
-                cls.id, {}).get(a.subject_id, a.hours_per_week)
+            subject_map.setdefault(a.subject_id, []).append(a)
 
-            subject = Subject.query.get(a.subject_id)
+        # 🔥 STEP 2: SPLIT LAB & THEORY
+        for subject_id, teachers in subject_map.items():
+
+            hours = SUBJECT_REQUIREMENTS.get(
+                cls.id, {}).get(subject_id, teachers[0].hours_per_week
+            )
+
+            subject = Subject.query.get(subject_id)
 
             if subject and subject.is_lab:
                 lab_tasks.append({
                     "class_id": cls.id,
-                    "subject_id": a.subject_id,
-                    "teacher_id": a.teacher_id,
-                    "hours": min(hours, 6)
+                    "subject_id": subject_id,
+                    "teacher_ids": [t.teacher_id for t in teachers],
+                    "hours": hours
                 })
             else:
                 for _ in range(hours):
                     tasks.append({
                         "class_id": cls.id,
-                        "subject_id": a.subject_id,
-                        "teacher_id": a.teacher_id
+                        "subject_id": subject_id,
+                        "teacher_id": random.choice(teachers).teacher_id
                     })
 
-        # 🔥 STEP 2: LABS (CONSECUTIVE)
+        # 🔥 STEP 3: LAB ASSIGNMENT
         for lab in lab_tasks:
 
             remaining_hours = lab["hours"]
@@ -74,135 +81,170 @@ def generate_timetable():
                 if existing_lab:
                     continue
 
-                block_size = 3 if remaining_hours >= 3 else 2
+                # block size
+                block_size = 3 if remaining_hours >= 3 else remaining_hours
 
                 for i in range(len(TIME_SLOTS) - (block_size - 1)):
 
                     slots = TIME_SLOTS[i:i+block_size]
-                    can_place = True
+                    selected_teacher = None
 
-                    for slot in slots:
-
-                        conflict = TimetableEntry.query.filter_by(
-                            class_id=cls.id,
-                            day=day,
-                            slot=slot
-                        ).first()
-
-                        teacher_conflict = TimetableEntry.query.filter_by(
-                            teacher_id=lab["teacher_id"],
-                            day=day,
-                            slot=slot
-                        ).first()
-
-                        if conflict or teacher_conflict:
-                            can_place = False
+                    # pick one teacher
+                    for t_id in lab["teacher_ids"]:
+                        if all(not TimetableEntry.query.filter_by(
+                                teacher_id=t_id, day=day, slot=s).first()
+                               for s in slots):
+                            selected_teacher = t_id
                             break
 
-                    if can_place:
-                        for slot in slots:
-                            db.session.add(TimetableEntry(
-                                class_id=lab["class_id"],
-                                subject_id=lab["subject_id"],
-                                teacher_id=lab["teacher_id"],
-                                day=day,
-                                slot=slot,
-                                is_lab_hour=True
-                            ))
+                    if not selected_teacher:
+                        continue
 
-                        remaining_hours -= block_size
-                        break
+                    # class conflict
+                    if any(TimetableEntry.query.filter_by(
+                            class_id=cls.id, day=day, slot=s).first()
+                           for s in slots):
+                        continue
 
-        # 🔥 STEP 3: THEORY (BALANCED DISTRIBUTION)
-        random.shuffle(tasks)
+                    for s in slots:
+                        db.session.add(TimetableEntry(
+                            class_id=cls.id,
+                            subject_id=lab["subject_id"],
+                            teacher_id=selected_teacher,
+                            day=day,
+                            slot=s,
+                            is_lab_hour=True
+                        ))
 
-        task_index = 0
-        total_tasks = len(tasks)
-
-        for slot in TIME_SLOTS:
-            for day in DAYS:
-
-                if task_index >= total_tasks:
+                    remaining_hours -= block_size
                     break
 
-                task = tasks[task_index]
+        # 🔥 STEP 4: THEORY (SKIP SATURDAY FOR S8_CSE)
+        random.shuffle(tasks)
 
-                existing_class = TimetableEntry.query.filter_by(
-                    class_id=cls.id,
-                    day=day,
-                    slot=slot
-                ).first()
+        for task in tasks:
+            placed = False
 
-                existing_teacher = TimetableEntry.query.filter_by(
-                    teacher_id=task["teacher_id"],
-                    day=day,
-                    slot=slot
-                ).first()
+            for day in DAYS:
 
-                if not existing_class and not existing_teacher:
+                # 🚨 SKIP SATURDAY
+                if cls.name == "S8_CSE" and day == "SATURDAY":
+                    continue
+
+                for slot in TIME_SLOTS:
+
+                    if TimetableEntry.query.filter_by(
+                        class_id=cls.id, day=day, slot=slot
+                    ).first():
+                        continue
+
+                    if TimetableEntry.query.filter_by(
+                        teacher_id=task["teacher_id"], day=day, slot=slot
+                    ).first():
+                        continue
 
                     db.session.add(TimetableEntry(
-                        class_id=task["class_id"],
+                        class_id=cls.id,
                         subject_id=task["subject_id"],
                         teacher_id=task["teacher_id"],
                         day=day,
                         slot=slot
                     ))
 
-                    task_index += 1
+                    placed = True
+                    break
 
-            if task_index >= total_tasks:
-                break
+                if placed:
+                    break
 
-        # 🔥 STEP 4: FILL EMPTY SLOTS
+        # 🔥 STEP 5: FORCE SATURDAY PROJECT (FINAL FIX)
+        if cls.name == "S8_CSE":
+
+            # ❌ CLEAR SATURDAY
+            TimetableEntry.query.filter_by(
+                class_id=cls.id,
+                day="SATURDAY"
+            ).delete()
+
+            db.session.commit()
+
+            project_subject = Subject.query.filter(
+                Subject.name.ilike("%project%")
+            ).first()
+
+            if project_subject:
+
+                project_teachers = subject_map.get(project_subject.id, [])
+
+                for slot in TIME_SLOTS:
+
+                    selected_teacher = None
+
+                    for t in project_teachers:
+                        if not TimetableEntry.query.filter_by(
+                            teacher_id=t.teacher_id,
+                            day="SATURDAY",
+                            slot=slot
+                        ).first():
+                            selected_teacher = t.teacher_id
+                            break
+
+                    if not selected_teacher and project_teachers:
+                        selected_teacher = random.choice(project_teachers).teacher_id
+
+                    if selected_teacher:
+                        db.session.add(TimetableEntry(
+                            class_id=cls.id,
+                            subject_id=project_subject.id,
+                            teacher_id=selected_teacher,
+                            day="SATURDAY",
+                            slot=slot
+                        ))
+
+        # 🔥 STEP 6: FILL REMAINING
+        day_subject_count = {}
+
         for day in DAYS:
             for slot in TIME_SLOTS:
 
-                existing = TimetableEntry.query.filter_by(
-                    class_id=cls.id,
-                    day=day,
-                    slot=slot
-                ).first()
-
-                if existing:
+                if cls.name == "S8_CSE" and day == "SATURDAY":
                     continue
 
-                for a in assignments:
+                if TimetableEntry.query.filter_by(
+                    class_id=cls.id, day=day, slot=slot
+                ).first():
+                    continue
 
-                    subject = Subject.query.get(a.subject_id)
+                for subject_id, teachers in subject_map.items():
+
+                    subject = Subject.query.get(subject_id)
 
                     if subject and subject.is_lab:
                         continue
 
-                    teacher_busy = TimetableEntry.query.filter_by(
-                        teacher_id=a.teacher_id,
-                        day=day,
-                        slot=slot
-                    ).first()
-
-                    if teacher_busy:
+                    count = day_subject_count.get((day, subject_id), 0)
+                    if count >= 2:
                         continue
 
-                    count = TimetableEntry.query.filter_by(
-                        class_id=cls.id,
-                        day=day,
-                        subject_id=a.subject_id
-                    ).count()
+                    teacher_id = random.choice(teachers).teacher_id
 
-                    if count >= 3:
+                    if TimetableEntry.query.filter_by(
+                        teacher_id=teacher_id, day=day, slot=slot
+                    ).first():
                         continue
 
                     db.session.add(TimetableEntry(
                         class_id=cls.id,
-                        subject_id=a.subject_id,
-                        teacher_id=a.teacher_id,
+                        subject_id=subject_id,
+                        teacher_id=teacher_id,
                         day=day,
                         slot=slot
                     ))
 
+                    day_subject_count[(day, subject_id)] = count + 1
                     break
 
-        # 🔥 STEP 5: PARALLEL CLASSES
+        # 🔥 STEP 7: PARALLEL
         if cls.id in PARALLEL_DATA:
             for pc in PARALLEL_DATA[cls.id]:
 
